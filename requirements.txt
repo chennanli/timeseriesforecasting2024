@@ -1,0 +1,7 @@
+pandas
+numpy
+neuralforecast
+matplotlib
+plotly
+scikit-learn
+xgboost
