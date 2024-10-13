@@ -1,134 +1,177 @@
 from src.imports import np, pd, plt
-from src.models.xgboost_model import XGBoostModel, create_features
+from src.models.xgboost_model import XGBoostModel, create_features, run_xgboost_model
+from src.models.prophet_model import ProphetModel, run_prophet_model
 from src.utils import load_data
 from src.config import DATA_PATH, TARGET_COLUMN, SPLIT_DATE
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error
 import os
 
 def save_plot(fig, filename):
     plot_dir = 'plots'
     os.makedirs(plot_dir, exist_ok=True)
     fig.savefig(os.path.join(plot_dir, filename))
+    plt.show()  # Add this line to display the plot
     plt.close(fig)
-
-def evaluate_forecast_horizons(model, data, max_days=14):
-    errors = []
-    for days in range(1, max_days + 1):
-        test_data = data.iloc[-24*days:]
-        features = create_features(test_data.drop(TARGET_COLUMN, axis=1))
-        predictions = model.predict_multi_step(features, steps=24*days)
-        mse = mean_squared_error(test_data[TARGET_COLUMN], predictions)
-        errors.append((days, mse))
-    
-    days, mses = zip(*errors)
-    best_horizon = days[np.argmin(mses)]
-    second_best_horizon = days[sorted(range(len(mses)), key=lambda i: mses[i])[1]]
-    print(f"Best forecast horizon: {best_horizon} days")
-    print(f"Second best forecast horizon: {second_best_horizon} days")
-    return days, mses, best_horizon, second_best_horizon
 
 def main():
     # Load data
     data = load_data(DATA_PATH)
     data = data.sort_index()
 
-    # Create features for the entire dataset
-    features_df = create_features(data)
-    features_df[TARGET_COLUMN] = data[TARGET_COLUMN]
-
-    # Set aside last 14 days for final testing
-    last_two_weeks = features_df.iloc[-336:]  # Last 14 days (14 * 24 hours)
-    data_for_training = features_df.iloc[:-336]
-
     # Convert SPLIT_DATE to datetime
     split_date = pd.to_datetime(SPLIT_DATE)
 
-    # Initialize and train the model
-    model = XGBoostModel()
-    model.fit(data_for_training, split_date, TARGET_COLUMN)
+    # Choose model(s) to run
+    models_to_run = input("Enter models to run (xgboost, prophet, or both): ").lower()
 
-    # Plot 1: Train/Test Error During Training
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(model.model.evals_result()['validation_0']['rmse'], label='Train')
-    ax.plot(model.model.evals_result()['validation_1']['rmse'], label='Test')
-    ax.set_title('Train/Test Error During Training')
-    ax.set_xlabel('Boosting Rounds')
-    ax.set_ylabel('RMSE')
-    ax.legend()
-    save_plot(fig, 'train_test_error.png')
+    if 'xgboost' in models_to_run or 'both' in models_to_run:
+        run_xgboost_analysis(data, split_date)
 
-    # Evaluate the model and find the best forecast horizons
-    days, mses, best_horizon, second_best_horizon = evaluate_forecast_horizons(model, last_two_weeks)
+    if 'prophet' in models_to_run or 'both' in models_to_run:
+        run_prophet_analysis(data, split_date)
 
-    # Plot 2: Forecast Error by Horizon
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(days, mses)
-    ax.set_title('Forecast Error by Horizon')
-    ax.set_xlabel('Forecast Horizon (Days)')
-    ax.set_ylabel('Mean Squared Error')
-    ax.set_xticks(days)
-    ax.set_xticklabels(days, rotation=45)
-    save_plot(fig, 'forecast_error_by_horizon.png')
+    if 'both' in models_to_run:
+        compare_models(data, split_date)
 
-    # Plot 3: Train/Predict Comparison for All Data
-    train_features = data_for_training.drop(TARGET_COLUMN, axis=1)
-    train_predictions = model.predict(train_features)
+def run_xgboost_analysis(data, split_date):
+    xgb_model, xgb_metrics, df_test = run_xgboost_model(data, split_date, TARGET_COLUMN)
+    
+    print("XGBoost Model Metrics:")
+    for metric, value in xgb_metrics.items():
+        print(f"{metric}: {value}")
+
+    # Plot XGBoost results
     fig, ax = plt.subplots(figsize=(20, 5))
-    ax.plot(data_for_training.index, data_for_training[TARGET_COLUMN], label='Actual')
-    ax.plot(data_for_training.index, train_predictions, label='Predicted')
-    ax.set_title('Train/Predict Comparison (All Data)')
+    ax.plot(df_test.index, df_test[TARGET_COLUMN], label='Actual')
+    ax.plot(df_test.index, df_test['MW_Prediction'], label='XGBoost Prediction')
+    ax.set_title('XGBoost Model: Actual vs Predicted')
     ax.set_xlabel('Date')
     ax.set_ylabel(TARGET_COLUMN)
     ax.legend()
-    save_plot(fig, 'train_predict_comparison.png')
+    save_plot(fig, 'xgboost_prediction.png')
 
-    # Plots 4 and 5: Best and Second Best Horizon Forecasts
-    for horizon in [best_horizon, second_best_horizon]:
-        horizon_hours = horizon * 24
-        future_dates = pd.date_range(start=data.index[-1] + pd.Timedelta(hours=1), periods=horizon_hours, freq='H')
-        future_df = pd.DataFrame(index=future_dates)
-        future_features = create_features(future_df)
-        
-        # Multi-step forecast
-        multi_step_predictions = model.predict_multi_step(future_features, steps=horizon_hours)
-        
-        # Auto-regressive forecast
-        auto_regressive_predictions = []
-        current_features = future_features.iloc[0].to_dict()
-        for _ in range(horizon_hours):
-            pred = model.predict(pd.DataFrame([current_features]))[0]
-            auto_regressive_predictions.append(pred)
-            current_features['hour'] = (current_features['hour'] + 1) % 24
-            if current_features['hour'] == 0:
-                current_features['dayofweek'] = (current_features['dayofweek'] + 1) % 7
-                current_features['dayofyear'] = current_features['dayofyear'] % 365 + 1
-                current_features['dayofmonth'] = (current_features['dayofmonth'] % 28) + 1
-                current_features['weekofyear'] = (current_features['weekofyear'] % 52) + 1
-            if current_features['hour'] == 0 and current_features['dayofmonth'] == 1:
-                current_features['month'] = (current_features['month'] % 12) + 1
-                if current_features['month'] == 1:
-                    current_features['year'] += 1
-                    current_features['quarter'] = 1
-                elif current_features['month'] in [4, 7, 10]:
-                    current_features['quarter'] += 1
+def run_prophet_analysis(data, split_date):
+    prophet_model, prophet_forecast, prophet_metrics, df_test = run_prophet_model(data, split_date, TARGET_COLUMN)
+    
+    print("Prophet Model Metrics:")
+    for metric, value in prophet_metrics.items():
+        print(f"{metric}: {value}")
 
-        fig, ax = plt.subplots(figsize=(20, 5))
-        ax.plot(last_two_weeks.index, last_two_weeks[TARGET_COLUMN], label='Actual')
-        ax.plot(future_dates, multi_step_predictions, label=f'Multi-step Predictions ({horizon} days)', color='red')
-        
-        # Only plot auto-regressive predictions if they're different from multi-step
-        if not np.allclose(multi_step_predictions, auto_regressive_predictions):
-            ax.plot(future_dates, auto_regressive_predictions, label=f'Auto-regressive Predictions ({horizon} days)', color='green')
-        
-        ax.set_title(f'{horizon}-day Forecast ({"Best" if horizon == best_horizon else "Second Best"} Horizon)')
-        ax.set_xlabel('Date')
-        ax.set_ylabel(TARGET_COLUMN)
-        ax.legend()
-        ax.tick_params(axis='x', rotation=45)
-        save_plot(fig, f'{horizon}_day_forecast.png')
+    # Plot Prophet results
+    fig, ax = plt.subplots(figsize=(20, 5))
+    ax.plot(df_test.index, df_test[TARGET_COLUMN], label='Actual')
+    ax.plot(prophet_forecast['ds'], prophet_forecast['yhat'], label='Prophet Prediction')
+    ax.fill_between(prophet_forecast['ds'], prophet_forecast['yhat_lower'], prophet_forecast['yhat_upper'], alpha=0.3)
+    ax.set_title('Prophet Model: Actual vs Predicted')
+    ax.set_xlabel('Date')
+    ax.set_ylabel(TARGET_COLUMN)
+    ax.legend()
+    save_plot(fig, 'prophet_prediction.png')
 
-    # Optional: Save the model
-    model.save_model('xgboost_full_model')
+    # Plot Prophet components
+    components_fig = prophet_model.plot_components(prophet_forecast)
+    save_plot(components_fig, 'prophet_components.png')
+
+def compare_models(data, split_date):
+    xgb_model, xgb_metrics, xgb_df_test = run_xgboost_model(data, split_date, TARGET_COLUMN)
+    prophet_model, prophet_forecast, prophet_metrics, prophet_df_test = run_prophet_model(data, split_date, TARGET_COLUMN)
+
+    # Combine predictions
+    combined_df = xgb_df_test[[TARGET_COLUMN, 'MW_Prediction']].copy()
+    combined_df = combined_df.rename(columns={'MW_Prediction': 'XGBoost_Prediction'})
+    combined_df['Prophet_Prediction'] = prophet_forecast.set_index('ds')['yhat']
+
+    # Forecast for 1 day and 7 days
+    future_dates_1d = pd.date_range(start=data.index[-1] + pd.Timedelta(hours=1), periods=24, freq='H')
+    future_dates_7d = pd.date_range(start=data.index[-1] + pd.Timedelta(hours=1), periods=24*7, freq='H')
+
+    xgb_forecast_1d = xgb_model.predict_multi_step(create_features(pd.DataFrame(index=future_dates_1d)), steps=24)
+    xgb_forecast_7d = xgb_model.predict_multi_step(create_features(pd.DataFrame(index=future_dates_7d)), steps=24*7)
+
+    prophet_forecast_1d = prophet_model.predict(future_dates_1d)
+    prophet_forecast_7d = prophet_model.predict(future_dates_7d)
+
+    # Calculate metrics for different forecast windows
+    def calculate_forecast_metrics(actual, predicted):
+        mse = mean_squared_error(actual, predicted)
+        mae = mean_absolute_error(actual, predicted)
+        mape = mean_absolute_percentage_error(actual, predicted)
+        rmse = np.sqrt(mse)
+        return {'MSE': mse, 'MAE': mae, 'MAPE': mape, 'RMSE': rmse}
+
+    xgb_metrics_1d = calculate_forecast_metrics(combined_df[TARGET_COLUMN][-24:], xgb_forecast_1d)
+    xgb_metrics_7d = calculate_forecast_metrics(combined_df[TARGET_COLUMN][-168:], xgb_forecast_7d)
+    prophet_metrics_1d = calculate_forecast_metrics(combined_df[TARGET_COLUMN][-24:], prophet_forecast_1d['yhat'])
+    prophet_metrics_7d = calculate_forecast_metrics(combined_df[TARGET_COLUMN][-168:], prophet_forecast_7d['yhat'])
+
+    # Create a figure with subplots
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(20, 30))
+    
+    # Plot 1: Full time series comparison
+    ax1.plot(combined_df.index, combined_df[TARGET_COLUMN], label='Actual', alpha=0.7)
+    ax1.plot(combined_df.index, combined_df['XGBoost_Prediction'], label='XGBoost Prediction', alpha=0.7)
+    ax1.plot(combined_df.index, combined_df['Prophet_Prediction'], label='Prophet Prediction', alpha=0.7)
+    ax1.set_title('Model Comparison: XGBoost vs Prophet (Full Time Series)')
+    ax1.set_xlabel('Date')
+    ax1.set_ylabel(TARGET_COLUMN)
+    ax1.legend()
+
+    # Plot 2: 1-day forecast
+    ax2.plot(combined_df.index[-24:], combined_df[TARGET_COLUMN][-24:], label='Actual', alpha=0.7)
+    ax2.plot(future_dates_1d, xgb_forecast_1d, label='XGBoost Forecast', alpha=0.7)
+    ax2.plot(future_dates_1d, prophet_forecast_1d['yhat'], label='Prophet Forecast', alpha=0.7)
+    ax2.set_title('1-Day Forecast Comparison')
+    ax2.set_xlabel('Date')
+    ax2.set_ylabel(TARGET_COLUMN)
+    ax2.legend()
+
+    # Plot 3: 7-day forecast
+    ax3.plot(combined_df.index[-168:], combined_df[TARGET_COLUMN][-168:], label='Actual', alpha=0.7)
+    ax3.plot(future_dates_7d, xgb_forecast_7d, label='XGBoost Forecast', alpha=0.7)
+    ax3.plot(future_dates_7d, prophet_forecast_7d['yhat'], label='Prophet Forecast', alpha=0.7)
+    ax3.set_title('7-Day Forecast Comparison')
+    ax3.set_xlabel('Date')
+    ax3.set_ylabel(TARGET_COLUMN)
+    ax3.legend()
+
+    plt.tight_layout()
+
+    # Add a table with metrics
+    metrics_data = [
+        ['Metric', 'XGBoost (1d)', 'Prophet (1d)', 'XGBoost (7d)', 'Prophet (7d)'],
+        ['RMSE', f"{xgb_metrics_1d['RMSE']:.2f}", f"{prophet_metrics_1d['RMSE']:.2f}", 
+         f"{xgb_metrics_7d['RMSE']:.2f}", f"{prophet_metrics_7d['RMSE']:.2f}"],
+        ['MAE', f"{xgb_metrics_1d['MAE']:.2f}", f"{prophet_metrics_1d['MAE']:.2f}", 
+         f"{xgb_metrics_7d['MAE']:.2f}", f"{prophet_metrics_7d['MAE']:.2f}"],
+        ['MAPE', f"{xgb_metrics_1d['MAPE']:.2f}%", f"{prophet_metrics_1d['MAPE']:.2f}%", 
+         f"{xgb_metrics_7d['MAPE']:.2f}%", f"{prophet_metrics_7d['MAPE']:.2f}%"]
+    ]
+
+    table = ax3.table(cellText=metrics_data, loc='bottom', cellLoc='center', colWidths=[0.2]*5)
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 1.5)
+    
+    save_plot(fig, 'model_comparison_with_forecasts.png')
+
+    # Print metrics comparison
+    print("\nMetrics Comparison:")
+    print(f"{'Metric':<10} {'XGBoost (1d)':>15} {'Prophet (1d)':>15} {'XGBoost (7d)':>15} {'Prophet (7d)':>15}")
+    print("-" * 80)
+    for metric in ['RMSE', 'MAE', 'MAPE']:
+        print(f"{metric:<10} {xgb_metrics_1d[metric]:>15.2f} {prophet_metrics_1d[metric]:>15.2f} "
+              f"{xgb_metrics_7d[metric]:>15.2f} {prophet_metrics_7d[metric]:>15.2f}")
+
+    # Determine the better model for each forecast window
+    if xgb_metrics_1d['RMSE'] < prophet_metrics_1d['RMSE']:
+        print("\nXGBoost model performs better for 1-day forecasts.")
+    else:
+        print("\nProphet model performs better for 1-day forecasts.")
+
+    if xgb_metrics_7d['RMSE'] < prophet_metrics_7d['RMSE']:
+        print("XGBoost model performs better for 7-day forecasts.")
+    else:
+        print("Prophet model performs better for 7-day forecasts.")
 
 if __name__ == "__main__":
     main()
