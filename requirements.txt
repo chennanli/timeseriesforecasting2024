@@ -1,7 +1,12 @@
-pandas
 numpy
-neuralforecast
+pandas
 matplotlib
-plotly
 scikit-learn
 xgboost
+statsmodels
+prophet
+seaborn
+# Add any other libraries you're using
+
+
+

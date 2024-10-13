@@ -20,8 +20,14 @@ import os
 import logging
 
 # Project-specific imports
-from src.models.neural_forecast_model import NeuralForecastModel
-from src.models.arima_model import ARIMAModel
-from src.models.prophet_model import ProphetModel
+from .models.neural_forecast_model import NeuralForecastModel
+from .models.arima_model import ARIMAModel
+
+try:
+    from .models.prophet_model import ProphetModel
+except ImportError:
+    print("Warning: ProphetModel could not be imported. Make sure the prophet package is installed.")
 
 # You can add more imports as needed
+from . import utils
+from .utils import some_utility_function
