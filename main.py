@@ -1,177 +1,205 @@
-from src.imports import np, pd, plt
-from src.models.xgboost_model import XGBoostModel, create_features, run_xgboost_model
-from src.models.prophet_model import ProphetModel, run_prophet_model
-from src.utils import load_data
-from src.config import DATA_PATH, TARGET_COLUMN, SPLIT_DATE
-from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error
+import pandas as pd
+import matplotlib.pyplot as plt
+from src.models.xgboost_model import XGBoostModel, create_features
+from src.models.prophet_model import ProphetModel
+from src.models.TCN_model import TCNModel
+from datetime import timedelta
 import os
+import numpy as np
+from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error
+from itertools import product
 
-def save_plot(fig, filename):
-    plot_dir = 'plots'
-    os.makedirs(plot_dir, exist_ok=True)
-    fig.savefig(os.path.join(plot_dir, filename))
-    plt.show()  # Add this line to display the plot
-    plt.close(fig)
+def load_data(file_path):
+    df = pd.read_csv(file_path)
+    df['Datetime'] = pd.to_datetime(df['Datetime'])
+    df.set_index('Datetime', inplace=True)
+    df.sort_index(inplace=True)
+    return df
+
+def plot_results(actual, predictions, model_name, start_date, end_date):
+    plt.figure(figsize=(12, 6))
+    plt.plot(actual.loc[start_date:end_date].index, actual.loc[start_date:end_date], label='Actual', alpha=0.5)
+    plt.plot(predictions.loc[start_date:end_date].index, predictions.loc[start_date:end_date], label='Predicted', alpha=0.5)
+    plt.title(f'{model_name} Model: Actual vs Predicted')
+    plt.xlabel('Time')
+    plt.ylabel('Value')
+    plt.legend()
+    plt.show()
+
+def calculate_metrics(actual, predictions):
+    mse = mean_squared_error(actual, predictions)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(actual, predictions)
+    mape = mean_absolute_percentage_error(actual, predictions)
+    return {'MSE': mse, 'RMSE': rmse, 'MAE': mae, 'MAPE': mape}
+
+def select_models():
+    print("Select models to run:")
+    print("1. XGBoost")
+    print("2. Prophet")
+    print("3. TCN")
+    print("4. TCN with hyperparameter tuning")
+    print("5. All models")
+    choice = input("Enter the numbers of the models you want to run (comma-separated): ")
+    choices = [int(c.strip()) for c in choice.split(',')]
+    if 5 in choices:
+        return ['XGBoost', 'Prophet', 'TCN', 'TCN_tuning']
+    selected_models = []
+    if 1 in choices:
+        selected_models.append('XGBoost')
+    if 2 in choices:
+        selected_models.append('Prophet')
+    if 3 in choices:
+        selected_models.append('TCN')
+    if 4 in choices:
+        selected_models.append('TCN_tuning')
+    return selected_models
+
+def tcn_grid_search(X_train, y_train, X_test, y_test, sequence_length, forecast_horizon):
+    param_grid = {
+        'num_filters': [32, 64, 128],
+        'kernel_size': [3, 5, 7],
+        'dilations': [[1, 2, 4, 8], [1, 2, 4, 8, 16]],
+        'dropout_rate': [0.1, 0.2, 0.3],
+        'learning_rate': [0.001, 0.0005, 0.0001]
+    }
+
+    best_model = None
+    best_rmse = float('inf')
+
+    for params in product(*param_grid.values()):
+        current_params = dict(zip(param_grid.keys(), params))
+        model = TCNModel(sequence_length, forecast_horizon, **current_params)
+        model.build_model()
+        model.train(X_train, y_train, epochs=50, batch_size=32, validation_split=0.2)
+        
+        predictions = model.predict(X_test)
+        rmse = np.sqrt(mean_squared_error(y_test.flatten(), predictions.flatten()))
+        
+        if rmse < best_rmse:
+            best_rmse = rmse
+            best_model = model
+            
+        print(f"Parameters: {current_params}")
+        print(f"RMSE: {rmse}")
+        print("--------------------")
+
+    return best_model
 
 def main():
-    # Load data
-    data = load_data(DATA_PATH)
-    data = data.sort_index()
-
-    # Convert SPLIT_DATE to datetime
-    split_date = pd.to_datetime(SPLIT_DATE)
-
-    # Choose model(s) to run
-    models_to_run = input("Enter models to run (xgboost, prophet, or both): ").lower()
-
-    if 'xgboost' in models_to_run or 'both' in models_to_run:
-        run_xgboost_analysis(data, split_date)
-
-    if 'prophet' in models_to_run or 'both' in models_to_run:
-        run_prophet_analysis(data, split_date)
-
-    if 'both' in models_to_run:
-        compare_models(data, split_date)
-
-def run_xgboost_analysis(data, split_date):
-    xgb_model, xgb_metrics, df_test = run_xgboost_model(data, split_date, TARGET_COLUMN)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, "data", "raw", "PJME_hourly.csv")
     
-    print("XGBoost Model Metrics:")
-    for metric, value in xgb_metrics.items():
-        print(f"{metric}: {value}")
+    if not os.path.exists(file_path):
+        print(f"Error: The file {file_path} does not exist.")
+        return
 
-    # Plot XGBoost results
-    fig, ax = plt.subplots(figsize=(20, 5))
-    ax.plot(df_test.index, df_test[TARGET_COLUMN], label='Actual')
-    ax.plot(df_test.index, df_test['MW_Prediction'], label='XGBoost Prediction')
-    ax.set_title('XGBoost Model: Actual vs Predicted')
-    ax.set_xlabel('Date')
-    ax.set_ylabel(TARGET_COLUMN)
-    ax.legend()
-    save_plot(fig, 'xgboost_prediction.png')
-
-def run_prophet_analysis(data, split_date):
-    prophet_model, prophet_forecast, prophet_metrics, df_test = run_prophet_model(data, split_date, TARGET_COLUMN)
+    target_column = "PJME_MW"
+    df = load_data(file_path)
     
-    print("Prophet Model Metrics:")
-    for metric, value in prophet_metrics.items():
-        print(f"{metric}: {value}")
+    # Use the last 20% of the data for testing
+    split_date = df.index[-int(len(df)*0.2)]
+    train_data = df.loc[:split_date].copy()
+    test_data = df.loc[split_date:].copy()
 
-    # Plot Prophet results
-    fig, ax = plt.subplots(figsize=(20, 5))
-    ax.plot(df_test.index, df_test[TARGET_COLUMN], label='Actual')
-    ax.plot(prophet_forecast['ds'], prophet_forecast['yhat'], label='Prophet Prediction')
-    ax.fill_between(prophet_forecast['ds'], prophet_forecast['yhat_lower'], prophet_forecast['yhat_upper'], alpha=0.3)
-    ax.set_title('Prophet Model: Actual vs Predicted')
-    ax.set_xlabel('Date')
-    ax.set_ylabel(TARGET_COLUMN)
-    ax.legend()
-    save_plot(fig, 'prophet_prediction.png')
+    # Increased sequence length for TCN
+    sequence_length = 168  # One week of hourly data
+    forecast_horizon = 24
 
-    # Plot Prophet components
-    components_fig = prophet_model.plot_components(prophet_forecast)
-    save_plot(components_fig, 'prophet_components.png')
+    selected_models = select_models()
 
-def compare_models(data, split_date):
-    xgb_model, xgb_metrics, xgb_df_test = run_xgboost_model(data, split_date, TARGET_COLUMN)
-    prophet_model, prophet_forecast, prophet_metrics, prophet_df_test = run_prophet_model(data, split_date, TARGET_COLUMN)
+    models = {
+        'XGBoost': XGBoostModel(),
+        'Prophet': ProphetModel(),
+        'TCN': TCNModel(sequence_length, forecast_horizon)
+    }
 
-    # Combine predictions
-    combined_df = xgb_df_test[[TARGET_COLUMN, 'MW_Prediction']].copy()
-    combined_df = combined_df.rename(columns={'MW_Prediction': 'XGBoost_Prediction'})
-    combined_df['Prophet_Prediction'] = prophet_forecast.set_index('ds')['yhat']
+    results = {}
+    predictions = {}
 
-    # Forecast for 1 day and 7 days
-    future_dates_1d = pd.date_range(start=data.index[-1] + pd.Timedelta(hours=1), periods=24, freq='H')
-    future_dates_7d = pd.date_range(start=data.index[-1] + pd.Timedelta(hours=1), periods=24*7, freq='H')
+    for name in selected_models:
+        print(f"\nTraining {name} model...")
+        
+        if name == 'XGBoost':
+            model = models[name]
+            model.fit(train_data, target_column)
+            X_test = create_features(test_data)
+            predictions[name] = pd.Series(model.predict(X_test), index=test_data.index)
+            results[name] = model.evaluate(X_test, test_data[target_column])
+        elif name == 'Prophet':
+            model = models[name]
+            model.fit(train_data, target_column)
+            forecast = model.predict(test_data.index)
+            predictions[name] = pd.Series(forecast['yhat'].values, index=test_data.index)
+            results[name] = model.evaluate(test_data, target_column)
+        elif name == 'TCN':
+            model = models[name]
+            X_train, X_test, y_train, y_test, test_index = model.load_and_preprocess_data(file_path, target_column)
+            model.build_model()
+            history = model.train(X_train, y_train, epochs=100, batch_size=32, validation_split=0.2)
+            tcn_predictions = model.predict(X_test)
+            predictions[name] = pd.Series(tcn_predictions.flatten(), index=test_index[:len(tcn_predictions.flatten())])
+            results[name] = calculate_metrics(y_test.flatten(), tcn_predictions.flatten())
+            
+            # Plot training history for TCN
+            plt.figure(figsize=(12, 6))
+            plt.plot(history.history['loss'], label='Training Loss')
+            plt.plot(history.history['val_loss'], label='Validation Loss')
+            plt.title('TCN Model Training History')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.legend()
+            plt.show()
+        elif name == 'TCN_tuning':
+            print("Performing TCN hyperparameter tuning...")
+            model = TCNModel(sequence_length, forecast_horizon)
+            X_train, X_test, y_train, y_test, test_index = model.load_and_preprocess_data(file_path, target_column)
+            best_model = tcn_grid_search(X_train, y_train, X_test, y_test, sequence_length, forecast_horizon)
+            tcn_predictions = best_model.predict(X_test)
+            predictions[name] = pd.Series(tcn_predictions.flatten(), index=test_index[:len(tcn_predictions.flatten())])
+            results[name] = calculate_metrics(y_test.flatten(), tcn_predictions.flatten())
 
-    xgb_forecast_1d = xgb_model.predict_multi_step(create_features(pd.DataFrame(index=future_dates_1d)), steps=24)
-    xgb_forecast_7d = xgb_model.predict_multi_step(create_features(pd.DataFrame(index=future_dates_7d)), steps=24*7)
+        if name != 'TCN_tuning':
+            plot_results(test_data[target_column], predictions[name], name, test_data.index[0], test_data.index[-1])
+        print(f"{name} Metrics:", results[name])
 
-    prophet_forecast_1d = prophet_model.predict(future_dates_1d)
-    prophet_forecast_7d = prophet_model.predict(future_dates_7d)
+    # Compare results
+    if len(selected_models) > 1:
+        print("\nComparison of Models:")
+        comparison_df = pd.DataFrame(results).T
+        print(comparison_df)
 
-    # Calculate metrics for different forecast windows
-    def calculate_forecast_metrics(actual, predicted):
-        mse = mean_squared_error(actual, predicted)
-        mae = mean_absolute_error(actual, predicted)
-        mape = mean_absolute_percentage_error(actual, predicted)
-        rmse = np.sqrt(mse)
-        return {'MSE': mse, 'MAE': mae, 'MAPE': mape, 'RMSE': rmse}
+        # Plot future predictions
+        future_days = 7
+        future_dates = pd.date_range(start=df.index[-1] + timedelta(hours=1), periods=future_days*24, freq='H')
+        
+        plt.figure(figsize=(12, 6))
+        for name in selected_models:
+            if name == 'XGBoost':
+                model = models[name]
+                future_df = pd.DataFrame(index=future_dates)
+                future_features = create_features(future_df)
+                future_predictions = model.predict(future_features)
+            elif name == 'Prophet':
+                model = models[name]
+                future_predictions = model.predict(future_dates)['yhat'].values
+            elif name == 'TCN':
+                model = models[name]
+                initial_sequence = X_test[-1].reshape(1, sequence_length, 1)
+                future_predictions = model.predict_sliding_window(initial_sequence, future_days*24).flatten()
+            elif name == 'TCN_tuning':
+                initial_sequence = X_test[-1].reshape(1, sequence_length, 1)
+                future_predictions = best_model.predict_sliding_window(initial_sequence, future_days*24).flatten()
 
-    xgb_metrics_1d = calculate_forecast_metrics(combined_df[TARGET_COLUMN][-24:], xgb_forecast_1d)
-    xgb_metrics_7d = calculate_forecast_metrics(combined_df[TARGET_COLUMN][-168:], xgb_forecast_7d)
-    prophet_metrics_1d = calculate_forecast_metrics(combined_df[TARGET_COLUMN][-24:], prophet_forecast_1d['yhat'])
-    prophet_metrics_7d = calculate_forecast_metrics(combined_df[TARGET_COLUMN][-168:], prophet_forecast_7d['yhat'])
+            plt.plot(future_dates, future_predictions, label=name, alpha=0.7)
 
-    # Create a figure with subplots
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(20, 30))
-    
-    # Plot 1: Full time series comparison
-    ax1.plot(combined_df.index, combined_df[TARGET_COLUMN], label='Actual', alpha=0.7)
-    ax1.plot(combined_df.index, combined_df['XGBoost_Prediction'], label='XGBoost Prediction', alpha=0.7)
-    ax1.plot(combined_df.index, combined_df['Prophet_Prediction'], label='Prophet Prediction', alpha=0.7)
-    ax1.set_title('Model Comparison: XGBoost vs Prophet (Full Time Series)')
-    ax1.set_xlabel('Date')
-    ax1.set_ylabel(TARGET_COLUMN)
-    ax1.legend()
+        plt.title('Future Predictions Comparison')
+        plt.xlabel('Time')
+        plt.ylabel('Value')
+        plt.legend()
+        plt.show()
 
-    # Plot 2: 1-day forecast
-    ax2.plot(combined_df.index[-24:], combined_df[TARGET_COLUMN][-24:], label='Actual', alpha=0.7)
-    ax2.plot(future_dates_1d, xgb_forecast_1d, label='XGBoost Forecast', alpha=0.7)
-    ax2.plot(future_dates_1d, prophet_forecast_1d['yhat'], label='Prophet Forecast', alpha=0.7)
-    ax2.set_title('1-Day Forecast Comparison')
-    ax2.set_xlabel('Date')
-    ax2.set_ylabel(TARGET_COLUMN)
-    ax2.legend()
-
-    # Plot 3: 7-day forecast
-    ax3.plot(combined_df.index[-168:], combined_df[TARGET_COLUMN][-168:], label='Actual', alpha=0.7)
-    ax3.plot(future_dates_7d, xgb_forecast_7d, label='XGBoost Forecast', alpha=0.7)
-    ax3.plot(future_dates_7d, prophet_forecast_7d['yhat'], label='Prophet Forecast', alpha=0.7)
-    ax3.set_title('7-Day Forecast Comparison')
-    ax3.set_xlabel('Date')
-    ax3.set_ylabel(TARGET_COLUMN)
-    ax3.legend()
-
-    plt.tight_layout()
-
-    # Add a table with metrics
-    metrics_data = [
-        ['Metric', 'XGBoost (1d)', 'Prophet (1d)', 'XGBoost (7d)', 'Prophet (7d)'],
-        ['RMSE', f"{xgb_metrics_1d['RMSE']:.2f}", f"{prophet_metrics_1d['RMSE']:.2f}", 
-         f"{xgb_metrics_7d['RMSE']:.2f}", f"{prophet_metrics_7d['RMSE']:.2f}"],
-        ['MAE', f"{xgb_metrics_1d['MAE']:.2f}", f"{prophet_metrics_1d['MAE']:.2f}", 
-         f"{xgb_metrics_7d['MAE']:.2f}", f"{prophet_metrics_7d['MAE']:.2f}"],
-        ['MAPE', f"{xgb_metrics_1d['MAPE']:.2f}%", f"{prophet_metrics_1d['MAPE']:.2f}%", 
-         f"{xgb_metrics_7d['MAPE']:.2f}%", f"{prophet_metrics_7d['MAPE']:.2f}%"]
-    ]
-
-    table = ax3.table(cellText=metrics_data, loc='bottom', cellLoc='center', colWidths=[0.2]*5)
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 1.5)
-    
-    save_plot(fig, 'model_comparison_with_forecasts.png')
-
-    # Print metrics comparison
-    print("\nMetrics Comparison:")
-    print(f"{'Metric':<10} {'XGBoost (1d)':>15} {'Prophet (1d)':>15} {'XGBoost (7d)':>15} {'Prophet (7d)':>15}")
-    print("-" * 80)
-    for metric in ['RMSE', 'MAE', 'MAPE']:
-        print(f"{metric:<10} {xgb_metrics_1d[metric]:>15.2f} {prophet_metrics_1d[metric]:>15.2f} "
-              f"{xgb_metrics_7d[metric]:>15.2f} {prophet_metrics_7d[metric]:>15.2f}")
-
-    # Determine the better model for each forecast window
-    if xgb_metrics_1d['RMSE'] < prophet_metrics_1d['RMSE']:
-        print("\nXGBoost model performs better for 1-day forecasts.")
-    else:
-        print("\nProphet model performs better for 1-day forecasts.")
-
-    if xgb_metrics_7d['RMSE'] < prophet_metrics_7d['RMSE']:
-        print("XGBoost model performs better for 7-day forecasts.")
-    else:
-        print("Prophet model performs better for 7-day forecasts.")
+    print("\nForecasting complete. Check the plots for results.")
 
 if __name__ == "__main__":
     main()

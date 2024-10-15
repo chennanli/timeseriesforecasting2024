@@ -18,10 +18,13 @@ def create_features(df, label=None):
     df['year'] = df.index.year
     df['dayofyear'] = df.index.dayofyear
     df['dayofmonth'] = df.index.day
-    df['weekofyear'] = df.index.isocalendar().week
+    df['weekofyear'] = df.index.isocalendar().week.astype('int32')
 
     X = df[['hour', 'dayofweek', 'quarter', 'month', 'year',
             'dayofyear', 'dayofmonth', 'weekofyear']]
+    
+    X = X.astype('int32')
+    
     if label:
         y = df[label]
         return X, y
@@ -38,39 +41,33 @@ class XGBoostModel:
             learning_rate=0.01,
             max_depth=5
         )
-        self.X_train = None
-        self.y_train = None
-        self.X_test = None
-        self.y_test = None
+        self.X = None
+        self.y = None
 
-    def fit(self, df, split_date, target_column):
+    def fit(self, df, target_column):
         df = df.sort_index()
-        self.prepare_data(df, split_date, target_column)
+        self.prepare_data(df, target_column)
         self.train()
         return self
 
-    def prepare_data(self, df, split_date, target_column):
-        df_train = df.loc[df.index <= split_date].copy()
-        df_test = df.loc[df.index > split_date].copy()
-
-        self.X_train, self.y_train = create_features(df_train, label=target_column)
-        self.X_test, self.y_test = create_features(df_test, label=target_column)
+    def prepare_data(self, df, target_column):
+        self.X, self.y = create_features(df, label=target_column)
 
     def train(self):
         self.model.fit(
-            self.X_train, self.y_train,
-            eval_set=[(self.X_train, self.y_train), (self.X_test, self.y_test)],
+            self.X, self.y,
+            eval_set=[(self.X, self.y)],
             verbose=100
         )
 
     def predict(self, X):
         return self.model.predict(X)
 
-    def evaluate(self):
-        y_pred = self.predict(self.X_test)
-        mse = mean_squared_error(self.y_test, y_pred)
-        mae = mean_absolute_error(self.y_test, y_pred)
-        mape = mean_absolute_percentage_error(self.y_test, y_pred)
+    def evaluate(self, X_test, y_test):
+        y_pred = self.predict(X_test)
+        mse = mean_squared_error(y_test, y_pred)
+        mae = mean_absolute_error(y_test, y_pred)
+        mape = mean_absolute_percentage_error(y_test, y_pred)
         rmse = np.sqrt(mse)
 
         return {
@@ -107,35 +104,13 @@ class XGBoostModel:
     def create_features(self, df):
         return create_features(df)
 
-    def predict_multi_step(self, X, steps):
-        predictions = []
-        current_features = X.iloc[0].to_dict()
-        for _ in range(steps):
-            pred = self.model.predict(pd.DataFrame([current_features]))[0]
-            predictions.append(pred)
-            # Update time-based features for next prediction
-            current_features['hour'] = (current_features['hour'] + 1) % 24
-            if current_features['hour'] == 0:
-                current_features['dayofweek'] = (current_features['dayofweek'] + 1) % 7
-                current_features['dayofyear'] = current_features['dayofyear'] % 365 + 1
-                current_features['dayofmonth'] = (current_features['dayofmonth'] % 28) + 1  # Simplified
-                current_features['weekofyear'] = (current_features['weekofyear'] % 52) + 1
-            if current_features['hour'] == 0 and current_features['dayofmonth'] == 1:
-                current_features['month'] = (current_features['month'] % 12) + 1
-                if current_features['month'] == 1:
-                    current_features['year'] += 1
-                    current_features['quarter'] = 1
-                elif current_features['month'] in [4, 7, 10]:
-                    current_features['quarter'] += 1
-        return predictions
-
 def run_xgboost_model(df, split_date, target_column):
     model = XGBoostModel()
-    model.fit(df, split_date, target_column)
-    metrics = model.evaluate()
+    model.fit(df, target_column)
 
     df_test = df.loc[df.index > split_date].copy()
-    X_test = create_features(df_test)
+    X_test, y_test = create_features(df_test, label=target_column)
+    metrics = model.evaluate(X_test, y_test)
     df_test['MW_Prediction'] = model.predict(X_test)
 
     return model, metrics, df_test
