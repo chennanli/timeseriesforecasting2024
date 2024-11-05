@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 from statsmodels.tsa.stattools import acf
 from tqdm import tqdm
 import time
+from ..config import PLOTS_DIR
+import os
 
 class TimeSeriesDataset(Dataset):
     def __init__(self, X, y):
@@ -185,5 +187,5 @@ def plot_training_history(history):
     plt.ylabel('Loss')
     plt.xlabel('Epoch')
     plt.legend()
-    plt.savefig('plots/lstm_torch_training_history.png')
+    plt.savefig(os.path.join(PLOTS_DIR, 'lstm_torch_training_history.png'))
     plt.close()
