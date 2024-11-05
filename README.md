@@ -6,8 +6,6 @@ This project focuses on forecasting energy consumption using various time series
 
 - XGBoost
 - Prophet
-- TCN (Temporal Convolutional Network)
-- LSTM
 
 ## Project Structure
 
